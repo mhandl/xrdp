@@ -32,6 +32,7 @@
 
 #include "xrdp_smartcard.h"
 #include "os_calls.h"
+#include "string_calls.h"
 #include "log.h"
 
 /* PIV Application AID: A0 00 00 03 08 00 00 10 00 01 00 */
@@ -379,15 +380,18 @@ parse_piv_cert_response(struct xrdp_smartcard *sc,
  * @return 0 if SW1/SW2 indicate success (90 00), 1 otherwise
  */
 static int
-check_apdu_status(const unsigned char *data, int data_len,
+check_apdu_status(const char *data, int data_len,
                   int *sw1, int *sw2)
 {
+    const unsigned char *udata;
+
     if (data_len < 2)
     {
         return 1;
     }
-    *sw1 = data[data_len - 2];
-    *sw2 = data[data_len - 1];
+    udata = (const unsigned char *) data;
+    *sw1 = udata[data_len - 2];
+    *sw2 = udata[data_len - 1];
 
     if (*sw1 == 0x90 && *sw2 == 0x00)
     {
@@ -557,7 +561,7 @@ xrdp_smartcard_process_rdpdr(struct xrdp_smartcard *sc,
         {
             /* Parse Transmit response for SELECT PIV AID */
             int recv_len;
-            unsigned char *recv_data;
+            char *recv_data;
             int sw1;
             int sw2;
 
@@ -599,7 +603,7 @@ xrdp_smartcard_process_rdpdr(struct xrdp_smartcard *sc,
         {
             /* Parse response for GET DATA (certificate object) */
             int recv_len;
-            unsigned char *recv_data;
+            char *recv_data;
             int sw1;
             int sw2;
 
@@ -635,8 +639,9 @@ xrdp_smartcard_process_rdpdr(struct xrdp_smartcard *sc,
 
             /* Parse the PIV certificate TLV from the response
              * (excluding the 2-byte status) */
-            if (parse_piv_cert_response(sc, recv_data,
-                                        recv_len - 2) != 0)
+            if (parse_piv_cert_response(
+                    sc, (const unsigned char *) recv_data,
+                    recv_len - 2) != 0)
             {
                 LOG(LOG_LEVEL_ERROR,
                     "xrdp_sc: failed to parse certificate");
@@ -655,7 +660,7 @@ xrdp_smartcard_process_rdpdr(struct xrdp_smartcard *sc,
         {
             /* Parse READ BINARY response and accumulate cert data */
             int recv_len;
-            unsigned char *recv_data;
+            char *recv_data;
             int sw1;
             int sw2;
 
