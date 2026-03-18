@@ -288,6 +288,13 @@ uds_client_add_context(struct pcsc_uds_client *uds_client,
     struct pcsc_context *pcscContext;
 
     LOG_DEVEL(LOG_LEVEL_DEBUG, "uds_client_add_context:");
+    if (context_bytes < 0 || context_bytes > (int) sizeof(pcscContext->context))
+    {
+        LOG(LOG_LEVEL_ERROR,
+            "uds_client_add_context: invalid context_bytes %d (max %d)",
+            context_bytes, (int) sizeof(pcscContext->context));
+        return 0;
+    }
     pcscContext = (struct pcsc_context *)
                   g_malloc(sizeof(struct pcsc_context), 1);
     if (pcscContext == 0)
@@ -349,6 +356,13 @@ context_add_card(struct pcsc_uds_client *uds_client,
     struct pcsc_card *pcscCard;
 
     LOG_DEVEL(LOG_LEVEL_DEBUG, "context_add_card: card_bytes %d", card_bytes);
+    if (card_bytes < 0 || card_bytes > (int) sizeof(pcscCard->card))
+    {
+        LOG(LOG_LEVEL_ERROR,
+            "context_add_card: invalid card_bytes %d (max %d)",
+            card_bytes, (int) sizeof(pcscCard->card));
+        return 0;
+    }
     pcscCard = (struct pcsc_card *)
                g_malloc(sizeof(struct pcsc_card), 1);
     if (pcscCard == 0)
@@ -493,6 +507,12 @@ scard_function_establish_context_return(void *user_data,
     g_memset(context, 0, 16);
     if (status == 0)
     {
+        if (!s_check_rem_and_log(in_s, 32,
+                                 "scard_function_establish_context_return: "
+                                 "header"))
+        {
+            return 1;
+        }
         in_uint8s(in_s, 28);
         in_uint32_le(in_s, context_bytes);
         if (context_bytes > 16)
@@ -647,8 +667,13 @@ scard_process_list_readers(struct trans *con, struct stream *in_s)
     pcscListReaders = g_new0(struct pcsc_list_readers, 1);
     pcscListReaders->uds_client_id = uds_client->uds_client_id;
     pcscListReaders->cchReaders = cchReaders;
-    scard_send_list_readers(pcscListReaders, lcontext->context,
-                            lcontext->context_bytes, groups, cchReaders, 1);
+    if (scard_send_list_readers(pcscListReaders, lcontext->context,
+                                lcontext->context_bytes, groups,
+                                cchReaders, 1) != 0)
+    {
+        g_free(pcscListReaders);
+        return 1;
+    }
     return 0;
 }
 
@@ -768,20 +793,33 @@ scard_function_list_readers_return(void *user_data,
         in_uint32_le(in_s, llen);
         if (cchReaders > 0)
         {
-            // Convert the wide multistring to a UTF-8 multistring
-            unsigned int u8len;
-            u8len = in_utf16_le_fixed_as_utf8_length(in_s, len / 2);
-            msz_readers = (char *)malloc(u8len);
-            if (msz_readers == NULL)
+            /* Validate that the stream has enough bytes for the
+             * UTF-16 multistring (llen bytes) */
+            if (!s_check_rem_and_log(
+                    in_s, llen,
+                    "scard_function_list_readers_return: utf16 data"))
             {
-                LOG(LOG_LEVEL_ERROR, "scard_function_list_readers_return: "
-                    "Can't allocate %u bytes of memory", u8len);
-                readers = 0;
+                return 1;
             }
-            else
             {
-                in_utf16_le_fixed_as_utf8(in_s, len / 2, msz_readers, u8len);
-                readers = count_multistring_elements(msz_readers, u8len);
+                /* Convert the wide multistring to a UTF-8 multistring */
+                unsigned int u8len;
+                u8len = in_utf16_le_fixed_as_utf8_length(in_s, llen / 2);
+                msz_readers = (char *)malloc(u8len);
+                if (msz_readers == NULL)
+                {
+                    LOG(LOG_LEVEL_ERROR,
+                        "scard_function_list_readers_return: "
+                        "Can't allocate %u bytes of memory", u8len);
+                    readers = 0;
+                }
+                else
+                {
+                    in_utf16_le_fixed_as_utf8(in_s, llen / 2,
+                                              msz_readers, u8len);
+                    readers = count_multistring_elements(msz_readers,
+                                                        u8len);
+                }
             }
         }
     }
@@ -895,6 +933,11 @@ scard_function_connect_return(void *user_data,
     hCard = 0;
     if (status == 0)
     {
+        if (!s_check_rem_and_log(in_s, 40,
+                                 "scard_function_connect_return: header"))
+        {
+            return 1;
+        }
         in_uint8s(in_s, 36);
         in_uint32_le(in_s, dwActiveProtocol);
         if (len > 40)
@@ -903,9 +946,20 @@ scard_function_connect_return(void *user_data,
             in_uint8p(in_s, card, card_bytes);
             lcard = context_add_card(uds_client, uds_client->connect_context,
                                      card, card_bytes);
-            hCard = lcard->app_card;
-            LOG_DEVEL(LOG_LEVEL_DEBUG, "  hCard %d dwActiveProtocol %d", hCard,
-                      dwActiveProtocol);
+            if (lcard == 0)
+            {
+                LOG(LOG_LEVEL_ERROR,
+                    "scard_function_connect_return: "
+                    "context_add_card failed");
+                status = 0x80100001; /* SCARD_F_INTERNAL_ERROR */
+            }
+            else
+            {
+                hCard = lcard->app_card;
+                LOG_DEVEL(LOG_LEVEL_DEBUG,
+                          "  hCard %d dwActiveProtocol %d",
+                          hCard, dwActiveProtocol);
+            }
         }
         else
         {
@@ -1180,17 +1234,52 @@ scard_process_transmit(struct trans *con, struct stream *in_s)
     LOG_DEVEL(LOG_LEVEL_DEBUG, "scard_process_transmit:");
     uds_client = (struct pcsc_uds_client *) (con->callback_data);
     LOG_DEVEL(LOG_LEVEL_DEBUG, "scard_process_transmit:");
+    if (!s_check_rem_and_log(in_s, 16,
+                             "scard_process_transmit: send pci header"))
+    {
+        return 1;
+    }
     in_uint32_le(in_s, hCard);
     in_uint32_le(in_s, send_ior.dwProtocol);
     in_uint32_le(in_s, send_ior.cbPciLength);
     in_uint32_le(in_s, send_ior.extra_bytes);
+    if (!s_check_rem_and_log(in_s, send_ior.extra_bytes,
+                             "scard_process_transmit: send extra_bytes"))
+    {
+        return 1;
+    }
     in_uint8p(in_s, send_ior.extra_data, send_ior.extra_bytes);
+    if (!s_check_rem_and_log(in_s, 4,
+                             "scard_process_transmit: send_bytes len"))
+    {
+        return 1;
+    }
     in_uint32_le(in_s, send_bytes);
+    if (!s_check_rem_and_log(in_s, send_bytes,
+                             "scard_process_transmit: send data"))
+    {
+        return 1;
+    }
     in_uint8p(in_s, send_data, send_bytes);
+    if (!s_check_rem_and_log(in_s, 12,
+                             "scard_process_transmit: recv pci header"))
+    {
+        return 1;
+    }
     in_uint32_le(in_s, recv_ior.dwProtocol);
     in_uint32_le(in_s, recv_ior.cbPciLength);
     in_uint32_le(in_s, recv_ior.extra_bytes);
+    if (!s_check_rem_and_log(in_s, recv_ior.extra_bytes,
+                             "scard_process_transmit: recv extra_bytes"))
+    {
+        return 1;
+    }
     in_uint8p(in_s, recv_ior.extra_data, recv_ior.extra_bytes);
+    if (!s_check_rem_and_log(in_s, 4,
+                             "scard_process_transmit: recv_bytes"))
+    {
+        return 1;
+    }
     in_uint32_le(in_s, recv_bytes);
     LOG_DEVEL(LOG_LEVEL_DEBUG, "scard_process_transmit: send dwProtocol %d cbPciLength %d "
               "recv dwProtocol %d cbPciLength %d send_bytes %d ",
@@ -1211,11 +1300,15 @@ scard_process_transmit(struct trans *con, struct stream *in_s)
     pcscTransmit->recv_ior = recv_ior;
     pcscTransmit->cbRecvLength = recv_bytes;
 
-    scard_send_transmit(pcscTransmit,
-                        lcontext->context, lcontext->context_bytes,
-                        lcard->card, lcard->card_bytes,
-                        send_data, send_bytes, recv_bytes,
-                        &send_ior, &recv_ior);
+    if (scard_send_transmit(pcscTransmit,
+                            lcontext->context, lcontext->context_bytes,
+                            lcard->card, lcard->card_bytes,
+                            send_data, send_bytes, recv_bytes,
+                            &send_ior, &recv_ior) != 0)
+    {
+        g_free(pcscTransmit);
+        return 1;
+    }
     return 0;
 }
 
@@ -1255,11 +1348,22 @@ scard_function_transmit_return(void *user_data,
     recvBuf = 0;
     if (status == 0)
     {
+        if (!s_check_rem_and_log(in_s, 24,
+                                 "scard_function_transmit_return: header"))
+        {
+            return 1;
+        }
         in_uint8s(in_s, 20);
         in_uint32_le(in_s, val);
         if (val != 0)
         {
             /* pioRecvPci */
+            if (!s_check_rem_and_log(in_s, 20,
+                                     "scard_function_transmit_return: "
+                                     "recv pci"))
+            {
+                return 1;
+            }
             in_uint8s(in_s, 8);
             in_uint32_le(in_s, recv_ior.dwProtocol);
             in_uint32_le(in_s, recv_ior.cbPciLength);
@@ -1267,15 +1371,39 @@ scard_function_transmit_return(void *user_data,
             in_uint32_le(in_s, recv_ior.extra_bytes);
             if (recv_ior.extra_bytes > 0)
             {
+                if (!s_check_rem_and_log(
+                        in_s, recv_ior.extra_bytes,
+                        "scard_function_transmit_return: extra"))
+                {
+                    return 1;
+                }
                 in_uint8p(in_s, recv_ior.extra_data, recv_ior.extra_bytes);
             }
         }
 
+        if (!s_check_rem_and_log(in_s, 8,
+                                 "scard_function_transmit_return: "
+                                 "recv buf header"))
+        {
+            return 1;
+        }
         in_uint8s(in_s, 4);
         in_uint32_le(in_s, val);
         if (val != 0)
         {
+            if (!s_check_rem_and_log(
+                    in_s, 4,
+                    "scard_function_transmit_return: cbRecvLength"))
+            {
+                return 1;
+            }
             in_uint32_le(in_s, cbRecvLength);
+            if (!s_check_rem_and_log(
+                    in_s, cbRecvLength,
+                    "scard_function_transmit_return: recv data"))
+            {
+                return 1;
+            }
             in_uint8p(in_s, recvBuf, cbRecvLength);
         }
 
@@ -1321,10 +1449,25 @@ scard_process_control(struct trans *con, struct stream *in_s)
     uds_client = (struct pcsc_uds_client *) (con->callback_data);
     LOG_DEVEL(LOG_LEVEL_DEBUG, "scard_process_control:");
 
+    if (!s_check_rem_and_log(in_s, 12,
+                             "scard_process_control: header"))
+    {
+        return 1;
+    }
     in_uint32_le(in_s, hCard);
     in_uint32_le(in_s, control_code);
     in_uint32_le(in_s, send_bytes);
+    if (!s_check_rem_and_log(in_s, send_bytes,
+                             "scard_process_control: send data"))
+    {
+        return 1;
+    }
     in_uint8p(in_s, send_data, send_bytes);
+    if (!s_check_rem_and_log(in_s, 4,
+                             "scard_process_control: recv_bytes"))
+    {
+        return 1;
+    }
     in_uint32_le(in_s, recv_bytes);
 
     user_data = (void *) (tintptr) (uds_client->uds_client_id);
@@ -1375,8 +1518,18 @@ scard_function_control_return(void *user_data,
     recvBuf = 0;
     if (status == 0)
     {
+        if (!s_check_rem_and_log(in_s, 32,
+                                 "scard_function_control_return: header"))
+        {
+            return 1;
+        }
         in_uint8s(in_s, 28);
         in_uint32_le(in_s, cbRecvLength);
+        if (!s_check_rem_and_log(in_s, cbRecvLength,
+                                 "scard_function_control_return: data"))
+        {
+            return 1;
+        }
         in_uint8p(in_s, recvBuf, cbRecvLength);
     }
     LOG_DEVEL(LOG_LEVEL_DEBUG, "scard_function_control_return: cbRecvLength %d", cbRecvLength);
@@ -1436,10 +1589,14 @@ scard_process_status(struct trans *con, struct stream *in_s)
     pcscStatus = (struct pcsc_status *) g_malloc(sizeof(struct pcsc_status), 1);
     pcscStatus->uds_client_id = uds_client->uds_client_id;
     pcscStatus->cchReaderLen = cchReaderLen;
-    scard_send_status(pcscStatus, 1,
-                      lcontext->context, lcontext->context_bytes,
-                      lcard->card, lcard->card_bytes,
-                      cchReaderLen, cbAtrLen);
+    if (scard_send_status(pcscStatus, 1,
+                          lcontext->context, lcontext->context_bytes,
+                          lcard->card, lcard->card_bytes,
+                          cchReaderLen, cbAtrLen) != 0)
+    {
+        g_free(pcscStatus);
+        return 1;
+    }
 
     return 0;
 }
@@ -1543,12 +1700,22 @@ scard_function_status_return(void *user_data,
     lreader_name[0] = 0;
     if (status == 0)
     {
-        in_uint8s(in_s, 16); // Skip [C706] PDU Header
-        in_uint8s(in_s, 4);  // ReturnCode
+        /* Need at least 16+4+4+4+4+4+32+4 = 72 bytes for the header */
+        if (!s_check_rem_and_log(in_s, 72,
+                                 "scard_function_status_return: header"))
+        {
+            return 1;
+        }
+        in_uint8s(in_s, 16); /* Skip [C706] PDU Header */
+        in_uint8s(in_s, 4);  /* ReturnCode */
         in_uint32_le(in_s, dwReaderLen);
-        in_uint8s(in_s, 4); // Referent Identifier
+        in_uint8s(in_s, 4); /* Referent Identifier */
         in_uint32_le(in_s, dwState);
-        dwState = g_ms2pc[dwState % 6];
+        if (dwState > 6)
+        {
+            dwState = 0;
+        }
+        dwState = g_ms2pc[dwState];
         in_uint32_le(in_s, dwProtocol);
         in_uint8a(in_s, attr, 32);
         in_uint32_le(in_s, dwAtrLen);
@@ -1581,6 +1748,10 @@ scard_function_status_return(void *user_data,
     out_uint8a(out_s, lreader_name, dwReaderLen);
     out_uint32_le(out_s, dwState);
     out_uint32_le(out_s, dwProtocol);
+    if (dwAtrLen > 32)
+    {
+        dwAtrLen = 32;
+    }
     out_uint32_le(out_s, dwAtrLen);
     out_uint8a(out_s, attr, dwAtrLen);
     out_uint32_le(out_s, status); /* SCARD_S_SUCCESS status */
@@ -1614,6 +1785,12 @@ scard_process_get_status_change(struct trans *con, struct stream *in_s)
     if ((cReaders < 0) || (cReaders > 16))
     {
         LOG(LOG_LEVEL_ERROR, "scard_process_get_status_change: bad cReaders %d", cReaders);
+        return 1;
+    }
+    /* Each reader needs 100 + 4 + 4 + 4 + 36 = 148 bytes in the stream */
+    if (!s_check_rem_and_log(in_s, cReaders * 148,
+                             "scard_process_get_status_change: reader data"))
+    {
         return 1;
     }
     rsa = (READER_STATE *) g_malloc(sizeof(READER_STATE) * cReaders, 1);
@@ -1700,9 +1877,29 @@ scard_function_get_status_change_return(void *user_data,
     }
     else
     {
+        if (!s_check_rem_and_log(in_s, 32,
+                                 "scard_function_get_status_change_return: "
+                                 "header"))
+        {
+            return 1;
+        }
         in_uint8s(in_s, 28);
         in_uint32_le(in_s, cReaders);
         LOG_DEVEL(LOG_LEVEL_DEBUG, "  cReaders %d", cReaders);
+        if (cReaders > 16)
+        {
+            LOG(LOG_LEVEL_ERROR,
+                "scard_function_get_status_change_return: "
+                "cReaders %d exceeds maximum", cReaders);
+            return 1;
+        }
+        /* Each reader returns 4 + 4 + 4 + 36 = 48 bytes */
+        if (!s_check_rem_and_log(in_s, cReaders * 48,
+                                 "scard_function_get_status_change_return: "
+                                 "reader data"))
+        {
+            return 1;
+        }
         out_uint32_le(out_s, cReaders);
         if (cReaders > 0)
         {

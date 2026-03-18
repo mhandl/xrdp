@@ -159,6 +159,100 @@ process_sys_login_request(struct scp_list_item *sli)
 }
 
 /******************************************************************************/
+static int
+process_cert_login_request(struct scp_list_item *sli)
+{
+    int rv;
+    const char *username;
+    const unsigned char *cert_der;
+    int cert_len;
+    const char *ip_addr;
+    int send_client_reply = 1;
+
+    rv = scp_get_cert_login_request(sli->client_trans, &username,
+                                    &cert_der, &cert_len, &ip_addr);
+    if (rv == 0)
+    {
+        enum scp_login_status errorcode;
+
+        LOG(LOG_LEVEL_INFO,
+            "Received cert login request from %s for user: %s IP: %s",
+            sli->peername, username, ip_addr);
+
+        if (sli->login_state != E_SLI_LOGIN_NOT_LOGGED_IN)
+        {
+            errorcode = E_SCP_LOGIN_ALREADY_LOGGED_IN;
+            LOG(LOG_LEVEL_ERROR, "Connection is already logged in for %s",
+                sli->username);
+        }
+        else if ((sli->username = g_strdup(username)) == NULL)
+        {
+            errorcode = E_SCP_LOGIN_NO_MEMORY;
+            LOG(LOG_LEVEL_ERROR, "Memory allocation failure logging in %s",
+                username);
+        }
+        else
+        {
+            /*
+             * Copy the IP address of the requesting user, anticipating a
+             * successful login. We need this so we can search for a session
+             * with a matching IP address if required.
+             */
+            g_snprintf(sli->start_ip_addr, sizeof(sli->start_ip_addr),
+                       "%s", ip_addr);
+
+            /* Create a sesexec process to handle the login
+             *
+             * We won't check for the user being valid here, as this might
+             * lead to information leakage */
+            if (sesexec_start(sli) != 0)
+            {
+                LOG(LOG_LEVEL_ERROR,
+                    "Can't start sesexec to authenticate user");
+                errorcode = E_SCP_LOGIN_GENERAL_ERROR;
+            }
+            else
+            {
+                int eicp_stat;
+                eicp_stat = eicp_send_cert_login_request(
+                                sli->sesexec_trans,
+                                username,
+                                cert_der,
+                                cert_len,
+                                ip_addr,
+                                sli->client_trans->sck);
+                if (eicp_stat != 0)
+                {
+                    LOG(LOG_LEVEL_ERROR,
+                        "Can't ask sesexec to authenticate user");
+                    errorcode = E_SCP_LOGIN_GENERAL_ERROR;
+                }
+                else
+                {
+                    /* We've handed over responsibility for the
+                     * SCP communication */
+                    send_client_reply = 0;
+                    sli->dispatcher_action = E_SLD_REMOVE_CLIENT_TRANS;
+                }
+            }
+        }
+
+        if (send_client_reply)
+        {
+            /* We only get here if something has gone
+             * wrong with the handover to sesexec */
+            rv = scp_send_login_response(sli->client_trans, errorcode,
+                                         1, -1);
+            sli->dispatcher_action = E_SLD_TERMINATE_SCP_CONN;
+        }
+
+        g_free((void *)cert_der);
+    }
+
+    return rv;
+}
+
+/******************************************************************************/
 
 /**
  * Authenticate and authorize a UDS connection
@@ -772,6 +866,10 @@ scp_process(struct scp_list_item *sli)
 
         case E_SCP_SYS_LOGIN_REQUEST:
             rv = process_sys_login_request(sli);
+            break;
+
+        case E_SCP_CERT_LOGIN_REQUEST:
+            rv = process_cert_login_request(sli);
             break;
 
         case E_SCP_UDS_LOGIN_REQUEST:

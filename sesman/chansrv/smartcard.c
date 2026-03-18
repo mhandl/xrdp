@@ -139,6 +139,8 @@ extern int   g_rdpdr_chan_id;    /* in chansrv.c */
 **                   static functions local to this file                     **
 ******************************************************************************/
 static struct stream *scard_make_new_ioctl(IRP *irp, tui32 ioctl);
+static struct stream *scard_make_new_ioctl_sized(IRP *irp, tui32 ioctl,
+                                                  int data_bytes);
 static int  scard_add_new_device(tui32 device_id);
 static int  scard_get_free_slot(void);
 static void scard_release_resources(void);
@@ -834,6 +836,47 @@ scard_make_new_ioctl(IRP *irp, tui32 ioctl)
     struct stream *s;
 
     xstream_new(s, 1024 * 4);
+
+    devredir_insert_DeviceIoRequest(s,
+                                    irp->DeviceId,
+                                    irp->FileId,
+                                    irp->CompletionId,
+                                    IRP_MJ_DEVICE_CONTROL,
+                                    IRP_MN_NONE);
+
+    xstream_wr_u32_le(s, 2048);        /* OutputBufferLength               */
+    s_push_layer(s, iso_hdr, 4);       /* InputBufferLength - insert later */
+    xstream_wr_u32_le(s, ioctl);       /* Ioctl Code                       */
+    out_uint8s(s, 20);                 /* padding                          */
+
+    /* [MS-RPCE] 2.2.6.1 */
+    xstream_wr_u32_le(s, 0x00081001);  /* len 8, LE, v1                    */
+    xstream_wr_u32_le(s, 0xcccccccc);  /* filler                           */
+
+    return s;
+}
+
+/*****************************************************************************/
+/**
+ * Like scard_make_new_ioctl, but allocates a stream large enough to hold
+ * data_bytes of payload beyond the standard IOCTL header.
+ */
+static struct stream *
+scard_make_new_ioctl_sized(IRP *irp, tui32 ioctl, int data_bytes)
+{
+    struct stream *s;
+    int alloc_size;
+
+    /* Header overhead: DeviceIoRequest(24) + OutputBufLen(4) +
+     * InputBufLen(4) + IoCtlCode(4) + padding(20) + RPCEhdr(8) = 64
+     * Plus the caller's data. Minimum 4096. */
+    alloc_size = 256 + data_bytes;
+    if (alloc_size < 1024 * 4)
+    {
+        alloc_size = 1024 * 4;
+    }
+
+    xstream_new(s, alloc_size);
 
     devredir_insert_DeviceIoRequest(s,
                                     irp->DeviceId,
@@ -1940,7 +1983,9 @@ scard_send_Transmit(IRP *irp, char *context, int context_bytes,
         return 1;
     }
 
-    if ((s = scard_make_new_ioctl(irp, SCARD_IOCTL_TRANSMIT)) == NULL)
+    if ((s = scard_make_new_ioctl_sized(irp, SCARD_IOCTL_TRANSMIT,
+                                        256 + send_bytes +
+                                        send_ior->extra_bytes)) == NULL)
     {
         LOG_DEVEL(LOG_LEVEL_ERROR, "scard_make_new_ioctl");
         return 1;
@@ -2127,7 +2172,8 @@ scard_send_Control(IRP *irp, char *context, int context_bytes,
         return 1;
     }
 
-    if ((s = scard_make_new_ioctl(irp, SCARD_IOCTL_CONTROL)) == NULL)
+    if ((s = scard_make_new_ioctl_sized(irp, SCARD_IOCTL_CONTROL,
+                                        256 + send_bytes)) == NULL)
     {
         LOG_DEVEL(LOG_LEVEL_ERROR, "scard_make_new_ioctl");
         return 1;

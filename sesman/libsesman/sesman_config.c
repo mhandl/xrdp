@@ -75,6 +75,10 @@
 #define SESMAN_CFG_SEC_PASS_SHELL_AS_ENV           "PassShellAsEnv"
 #define SESMAN_CFG_SEC_XORG_NO_NEW_PRIVILEGES      "XorgNoNewPrivileges"
 #define SESMAN_CFG_SEC_SESSION_SOCKDIR_GROUP       "SessionSockdirGroup"
+#define SESMAN_CFG_SEC_CERT_AUTH_ENABLED           "CertAuthEnabled"
+#define SESMAN_CFG_SEC_CERT_CA_FILE                "CertCAFile"
+#define SESMAN_CFG_SEC_CERT_CA_DIR                 "CertCADir"
+#define SESMAN_CFG_SEC_CERT_USERNAME_FIELD         "CertUsernameField"
 
 #define SESMAN_CFG_SESSIONS          "Sessions"
 #define SESMAN_CFG_SESS_MAX          "MaxSessions"
@@ -326,6 +330,10 @@ config_read_security(int file, struct config_security *sc,
     sc->ts_users = g_strdup("");
     sc->ts_admins = g_strdup("");
     sc->session_sockdir_group = g_strdup("");
+    sc->cert_auth_enabled = 0;
+    sc->cert_ca_file = g_strdup("");
+    sc->cert_ca_dir = g_strdup("");
+    sc->cert_username_field = g_strdup("UPN");
 
     file_read_section(file, SESMAN_CFG_SECURITY, param_n, param_v);
 
@@ -407,6 +415,26 @@ config_read_security(int file, struct config_security *sc,
         {
             g_free(sc->session_sockdir_group);
             sc->session_sockdir_group = g_strdup(value);
+        }
+        else if (0 == g_strcasecmp(buf, SESMAN_CFG_SEC_CERT_AUTH_ENABLED))
+        {
+            sc->cert_auth_enabled = g_text2bool(value);
+        }
+        else if (0 == g_strcasecmp(buf, SESMAN_CFG_SEC_CERT_CA_FILE))
+        {
+            g_free(sc->cert_ca_file);
+            sc->cert_ca_file = g_strdup(value);
+        }
+        else if (0 == g_strcasecmp(buf, SESMAN_CFG_SEC_CERT_CA_DIR))
+        {
+            g_free(sc->cert_ca_dir);
+            sc->cert_ca_dir = g_strdup(value);
+        }
+        else if (0 == g_strcasecmp(buf,
+                                    SESMAN_CFG_SEC_CERT_USERNAME_FIELD))
+        {
+            g_free(sc->cert_username_field);
+            sc->cert_username_field = g_strdup(value);
         }
     }
 
@@ -727,6 +755,11 @@ config_dump(struct config_sesman *config)
     g_writeln("    TSUsersGroup:              %s", sc->ts_users);
     g_writeln("    TSAdminsGroup:             %s", sc->ts_admins);
     g_writeln("    SessionSockdirGroup:       %s", sc->session_sockdir_group);
+    g_writeln("    CertAuthEnabled:           %d", sc->cert_auth_enabled);
+    g_writeln("    CertCAFile:                %s", sc->cert_ca_file);
+    g_writeln("    CertCADir:                 %s", sc->cert_ca_dir);
+    g_writeln("    CertUsernameField:         %s",
+              sc->cert_username_field);
 
 
     /* Xorg */
@@ -786,6 +819,9 @@ config_free(struct config_sesman *cs)
         g_free(cs->sec.ts_users);
         g_free(cs->sec.ts_admins);
         g_free(cs->sec.session_sockdir_group);
+        g_free(cs->sec.cert_ca_file);
+        g_free(cs->sec.cert_ca_dir);
+        g_free(cs->sec.cert_username_field);
         g_free(cs);
     }
 }

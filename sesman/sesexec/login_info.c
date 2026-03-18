@@ -39,6 +39,7 @@
 #include "os_calls.h"
 #include "scp.h"
 #include "sesexec.h"
+#include "ssl_calls.h"
 #include "string_calls.h"
 
 /******************************************************************************/
@@ -286,6 +287,176 @@ login_info_sys_login_user(struct trans *scp_trans,
                 status = E_SCP_LOGIN_GENERAL_ERROR;
                 break;
             }
+        }
+    }
+
+    if (status != E_SCP_LOGIN_OK)
+    {
+        login_info_free(result);
+        result = NULL;
+    }
+
+    return result;
+}
+
+/******************************************************************************/
+/**
+ * Authenticate and authorize a certificate-based connection
+ *
+ * @param supplied_username Name for user (from certificate)
+ * @param cert_der DER-encoded client certificate
+ * @param cert_len Length of cert_der in bytes
+ * @param ip_addr Remote IP address
+ * @param login_info Structure to fill in for a successful login
+ * @return Status for the operation
+ *
+ * @post If E_SCP_LOGIN_OK is returned, login_info is filled in
+ */
+static enum scp_login_status
+authenticate_and_authorize_cert_connection(const char *supplied_username,
+        const unsigned char *cert_der,
+        int cert_len,
+        const char *ip_addr,
+        struct login_info *login_info)
+{
+    int uid;
+    char *username; /* From reverse-looking up the UID */
+    enum scp_login_status status;
+    struct auth_info *auth_info;
+
+    if (g_getuser_info_by_name(supplied_username,
+                               &uid, NULL, NULL, NULL, NULL) != 0)
+    {
+        /* we can't get a UID for the user */
+        LOG(LOG_LEVEL_ERROR, "Can't get UID for user %s",
+            supplied_username);
+        log_authfail_message(supplied_username, ip_addr);
+        status = E_SCP_LOGIN_NOT_AUTHENTICATED;
+    }
+    else if (g_getuser_info_by_uid(uid,
+                                   &username,
+                                   NULL, NULL, NULL, NULL) != 0)
+    {
+        LOG(LOG_LEVEL_ERROR, "Can't reverse lookup UID %d", uid);
+        status = E_SCP_LOGIN_NOT_AUTHENTICATED;
+    }
+    else
+    {
+        if (g_strcmp(username, supplied_username) != 0)
+        {
+            /*
+             * If using a federated naming service (e.g. AD), the username
+             * supplied may not match that name mapped to by the UID. We
+             * will generate a warning in this instance so the user can see
+             * what is being used
+             */
+            LOG(LOG_LEVEL_WARNING,
+                "Using username %s for the session (from UID %d)",
+                username, uid);
+        }
+
+        auth_info = auth_cert(username, cert_der, cert_len,
+                              ip_addr, &status);
+
+        /* Sanity check on result of call */
+        if ((auth_info != NULL && status != E_SCP_LOGIN_OK) ||
+                (auth_info == NULL && status == E_SCP_LOGIN_OK))
+        {
+            LOG(LOG_LEVEL_ERROR, "Bugcheck; inconsistent auth result. "
+                "info = %p, status = %d",
+                (void *)auth_info, (int)status);
+            status = E_SCP_LOGIN_GENERAL_ERROR;
+            auth_end(auth_info);
+            auth_info = NULL;
+        }
+
+        /* Group access allowed? */
+        if (status == E_SCP_LOGIN_OK &&
+                !access_login_allowed(&g_cfg->sec, username))
+        {
+            LOG(LOG_LEVEL_INFO, "Username okay but group problem for "
+                "user: %s", username);
+            status = E_SCP_LOGIN_NOT_AUTHORIZED;
+            auth_end(auth_info);
+            auth_info = NULL;
+        }
+
+        switch (status)
+        {
+            case E_SCP_LOGIN_OK:
+            {
+                char *dup_username = g_strdup(username);
+                char *dup_ip_addr = g_strdup(ip_addr);
+
+                if (dup_username == NULL || dup_ip_addr == NULL)
+                {
+                    LOG(LOG_LEVEL_ERROR,
+                        "%s : Memory allocation failed",
+                        __func__);
+                    g_free(dup_username);
+                    g_free(dup_ip_addr);
+                    status = E_SCP_LOGIN_NO_MEMORY;
+                    auth_end(auth_info);
+                    auth_info = NULL;
+                }
+                else
+                {
+                    LOG(LOG_LEVEL_INFO,
+                        "Access permitted for user: %s"
+                        " (cert auth)", username);
+                    login_info->uid = uid;
+                    login_info->username = dup_username;
+                    login_info->ip_addr = dup_ip_addr;
+                    login_info->auth_info = auth_info;
+                }
+            }
+            break;
+
+            case E_SCP_LOGIN_NOT_AUTHENTICATED:
+                log_authfail_message(username, ip_addr);
+                break;
+
+            default:
+                break;
+        }
+
+        g_free(username);
+    }
+    return status;
+}
+
+/******************************************************************************/
+struct login_info *
+login_info_cert_login_user(struct trans *scp_trans,
+                           const char *username,
+                           const unsigned char *cert_der,
+                           int cert_len,
+                           const char *ip_addr)
+{
+    struct login_info *result;
+    enum scp_login_status status = E_SCP_LOGIN_GENERAL_ERROR;
+    int server_closed = 0;
+
+    if ((result = g_new0(struct login_info, 1)) == NULL)
+    {
+        LOG(LOG_LEVEL_ERROR, "Allocation failure logging in user");
+    }
+    else
+    {
+        result->uid = (uid_t) -1;
+
+        status = authenticate_and_authorize_cert_connection(
+                     username, cert_der, cert_len, ip_addr, result);
+
+        if (status != E_SCP_LOGIN_OK)
+        {
+            server_closed = 1;
+        }
+
+        if (scp_send_login_response(scp_trans, status,
+                                    server_closed, result->uid) != 0)
+        {
+            status = E_SCP_LOGIN_GENERAL_ERROR;
         }
     }
 

@@ -35,6 +35,8 @@
 #define MAX_NR_CHANNELS 16
 #define MAX_CHANNEL_NAME 16
 
+struct xrdp_smartcard;
+
 /* Code values used in 'xrdp_mm->code=' settings */
 #define XVNC_SESSION_CODE 0
 #define XVNC_UDS_SESSION_CODE 1
@@ -468,6 +470,13 @@ struct xrdp_mm
     int last_sync_device_flags;
     /* Whether the sesman_trans is a CCP trans or not */
     int sesman_trans_is_ccp;
+
+    /* Smartcard certificate authentication (pre-auth phase) */
+    struct xrdp_smartcard *smartcard;
+    unsigned char *smartcard_cert_der;
+    int smartcard_cert_len;
+    char smartcard_username[256];
+    int smartcard_auth_attempted;
 };
 
 struct xrdp_key_info

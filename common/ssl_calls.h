@@ -121,4 +121,52 @@ get_openssl_version(void);
 tintptr
 ssl_get_rwo(const struct ssl_tls *ssl);
 
+/**
+ * Extract the Common Name (CN) from the subject of a DER-encoded
+ * X.509 certificate
+ *
+ * @param cert_der DER-encoded certificate data
+ * @param cert_len Length of the DER-encoded certificate data
+ * @param cn Buffer to receive the CN string (null-terminated)
+ * @param cn_len Size of the cn buffer
+ * @return 0 on success, 1 on error
+ */
+int
+ssl_cert_get_subject_cn(const unsigned char *cert_der, int cert_len,
+                        char *cn, int cn_len);
+
+/**
+ * Extract the UPN (User Principal Name) from the Subject Alternative
+ * Name extension of a DER-encoded X.509 certificate
+ *
+ * Looks for a Microsoft UPN otherName (OID 1.3.6.1.4.1.311.20.2.3)
+ * in the SAN extension. Falls back to an rfc822Name (email) entry
+ * if no UPN otherName is found.
+ *
+ * @param cert_der DER-encoded certificate data
+ * @param cert_len Length of the DER-encoded certificate data
+ * @param upn Buffer to receive the UPN string (null-terminated)
+ * @param upn_len Size of the upn buffer
+ * @return 0 on success, 1 on error
+ */
+int
+ssl_cert_get_san_upn(const unsigned char *cert_der, int cert_len,
+                     char *upn, int upn_len);
+
+/**
+ * Verify a DER-encoded X.509 certificate against a CA certificate
+ * store
+ *
+ * @param cert_der DER-encoded certificate data
+ * @param cert_len Length of the DER-encoded certificate data
+ * @param ca_cert_file Path to a file containing trusted CA
+ *                     certificates in PEM format, or NULL
+ * @param ca_cert_dir Path to a directory containing trusted CA
+ *                    certificates, or NULL
+ * @return 0 on success (certificate is valid), 1 on error
+ */
+int
+ssl_cert_verify(const unsigned char *cert_der, int cert_len,
+                const char *ca_cert_file, const char *ca_cert_dir);
+
 #endif

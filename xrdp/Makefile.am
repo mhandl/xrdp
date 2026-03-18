@@ -83,6 +83,8 @@ xrdp_SOURCES = \
   xrdp_main_utils.c \
   xrdp_tconfig.c \
   xrdp_tconfig.h \
+  xrdp_smartcard.c \
+  xrdp_smartcard.h \
   $(XRDP_EXTRA_SOURCES)
 
 xrdp_LDADD = \

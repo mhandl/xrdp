@@ -65,8 +65,10 @@ enum scp_msg_code
     E_SCP_CREATE_SOCKDIR_REQUEST,
     E_SCP_CREATE_SOCKDIR_RESPONSE,
 
-    E_SCP_CLOSE_CONNECTION_REQUEST
+    E_SCP_CLOSE_CONNECTION_REQUEST,
     // No E_SCP_CLOSE_CONNECTION_RESPONSE
+
+    E_SCP_CERT_LOGIN_REQUEST
 };
 
 /* Common facilities */
@@ -282,6 +284,49 @@ scp_get_sys_login_request(struct trans *trans,
                           const char **username,
                           const char **password,
                           const char **ip_addr);
+
+/**
+ * Send an E_SCP_CERT_LOGIN_REQUEST (SCP client)
+ *
+ * User is logged in using a client certificate
+ *
+ * @param trans SCP transport
+ * @param username Username
+ * @param cert_der DER-encoded client certificate
+ * @param cert_len Length of cert_der in bytes
+ * @param ip_addr IP address for the client (or "" if not known)
+ * @return != 0 for error
+ *
+ * Server replies with E_SCP_LOGIN_RESPONSE
+ */
+int
+scp_send_cert_login_request(struct trans *trans,
+                            const char *username,
+                            const unsigned char *cert_der,
+                            int cert_len,
+                            const char *ip_addr);
+
+/**
+ * Parse an incoming E_SCP_CERT_LOGIN_REQUEST message (SCP server)
+ *
+ * @param trans SCP transport
+ * @param[out] username Username
+ * @param[out] cert_der DER-encoded client certificate
+ * @param[out] cert_len Length of cert_der in bytes
+ * @param[out] ip_addr IP address for the client. May be ""
+ * @return != 0 for error
+ *
+ * The returned cert_der is dynamically allocated and must be
+ * freed by the caller with g_free(). The username and ip_addr
+ * pointers are valid until scp_msg_in_reset() is called for
+ * the transport.
+ */
+int
+scp_get_cert_login_request(struct trans *trans,
+                           const char **username,
+                           const unsigned char **cert_der,
+                           int *cert_len,
+                           const char **ip_addr);
 
 /**
  * Send an E_SCP_LOGIN_RESPONSE (SCP server)

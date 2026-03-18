@@ -396,6 +396,47 @@ auth_uds(const char *user, enum scp_login_status *errorcode)
 
 /******************************************************************************/
 
+struct auth_info *
+auth_cert(const char *user, const unsigned char *cert_der, int cert_len,
+          const char *client_ip, enum scp_login_status *errorcode)
+{
+    struct auth_info *auth_info;
+    enum scp_login_status status;
+
+    (void) cert_der;
+    (void) cert_len;
+
+    auth_info = g_new0(struct auth_info, 1);
+    if (auth_info == NULL)
+    {
+        status = E_SCP_LOGIN_NO_MEMORY;
+    }
+    else
+    {
+        /*
+         * Certificate was already verified cryptographically by sesexec,
+         * so no password authentication is needed. We still run
+         * pam_acct_mgmt to check account validity (expiry, etc).
+         */
+        status = common_pam_login(auth_info, user, NULL, client_ip, 0);
+
+        if (status != E_SCP_LOGIN_OK)
+        {
+            g_free(auth_info);
+            auth_info = NULL;
+        }
+    }
+
+    if (errorcode != NULL)
+    {
+        *errorcode = status;
+    }
+
+    return auth_info;
+}
+
+/******************************************************************************/
+
 /* returns error */
 static int
 auth_start_session_private(struct auth_info *auth_info, const char *display)

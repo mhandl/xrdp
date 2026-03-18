@@ -110,12 +110,28 @@ PCSC_API SCARD_IO_REQUEST g_rgSCardRawPci = { SCARD_PROTOCOL_RAW, 8 };
 #define LMIN(_val1, _val2) (_val1) < (_val2) ? (_val1) : (_val2)
 #define LMAX(_val1, _val2) (_val1) > (_val2) ? (_val1) : (_val2)
 
+#define PCSC_MAX_MSG_SIZE (1024 * 1024)  /* 1 MB cap for message buffers */
+
+/*****************************************************************************/
+/* Allocate a message buffer with overflow checking.
+ * Returns NULL if the requested size is invalid or exceeds the cap. */
+static char *
+alloc_msg_buf(int size)
+{
+    if (size <= 0 || size > PCSC_MAX_MSG_SIZE)
+    {
+        LLOGLN(0, ("alloc_msg_buf: invalid size %d", size));
+        return NULL;
+    }
+    return (char *) g_malloc_nofail(size);
+}
+
 static int g_sck = -1; /* unix domain socket */
 
 static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-/* for pcsc_stringify_error */
-static char g_error_str[512];
+/* for pcsc_stringify_error — thread-local to avoid races */
+static __thread char g_error_str[512];
 
 /*****************************************************************************/
 /* produce a hex dump */
@@ -173,9 +189,11 @@ connect_to_chansrv(void)
     struct sockaddr_un saddr;
     struct sockaddr *psaddr;
 
+    pthread_mutex_lock(&g_mutex);
     if (g_sck != -1)
     {
         /* already connected */
+        pthread_mutex_unlock(&g_mutex);
         return 0;
     }
     xrdp_session = getenv("XRDP_SESSION");
@@ -183,12 +201,14 @@ connect_to_chansrv(void)
     {
         /* XRDP_SESSION must be set */
         LLOGLN(0, ("connect_to_chansrv: error, not xrdp session"));
+        pthread_mutex_unlock(&g_mutex);
         return 1;
     }
 
     if (g_get_display_string(disstr, sizeof(disstr)) < 0)
     {
         LLOGLN(0, ("connect_to_chansrv: error, don't understand DISPLAY"));
+        pthread_mutex_unlock(&g_mutex);
         return 1;
     }
     home_str = getenv("HOME");
@@ -196,12 +216,14 @@ connect_to_chansrv(void)
     {
         /* HOME must be set */
         LLOGLN(0, ("connect_to_chansrv: error, home not set"));
+        pthread_mutex_unlock(&g_mutex);
         return 1;
     }
     g_sck = socket(PF_LOCAL, SOCK_STREAM, 0);
     if (g_sck == -1)
     {
         LLOGLN(0, ("connect_to_chansrv: error, socket failed"));
+        pthread_mutex_unlock(&g_mutex);
         return 1;
     }
     memset(&saddr, 0, sizeof(struct sockaddr_un));
@@ -222,8 +244,10 @@ connect_to_chansrv(void)
         close(g_sck);
         g_sck = -1;
         LLOGLN(0, ("connect_to_chansrv: error, open %s", saddr.sun_path));
+        pthread_mutex_unlock(&g_mutex);
         return 1;
     }
+    pthread_mutex_unlock(&g_mutex);
     return 0;
 }
 
@@ -647,6 +671,7 @@ SCardStatus(SCARDHANDLE hCard, LPSTR mszReaderName, LPDWORD pcchReaderLen,
     int status;
     int offset;
     int cchReaderLen;
+    int orig_atr_len;
     int to_copy;
 
     LLOGLN(10, ("SCardStatus:"));
@@ -665,7 +690,22 @@ SCardStatus(SCARDHANDLE hCard, LPSTR mszReaderName, LPDWORD pcchReaderLen,
     LLOGLN(10, ("  cbAtrLen %d", (int)*pcbAtrLen));
 
     cchReaderLen = *pcchReaderLen;
-    msg = (char *) g_malloc_nofail(8192);
+    orig_atr_len = *pcbAtrLen;
+    {
+        /* Response: 4(readerLen) + readerLen + 4(state) + 4(proto) +
+         * 4(atrLen) + atrLen + 4(status) = 20 + readerLen + atrLen */
+        int msg_size = 20 + cchReaderLen + orig_atr_len;
+        if (msg_size < 256)
+        {
+            msg_size = 256;
+        }
+        msg = alloc_msg_buf(msg_size);
+        if (msg == NULL)
+        {
+            LLOGLN(0, ("SCardStatus: error, alloc_msg_buf"));
+            return SCARD_F_INTERNAL_ERROR;
+        }
+    }
     SET_UINT32(msg, 0, hCard);
     SET_UINT32(msg, 4, cchReaderLen);
     SET_UINT32(msg, 8, *pcbAtrLen);
@@ -675,7 +715,14 @@ SCardStatus(SCARDHANDLE hCard, LPSTR mszReaderName, LPDWORD pcchReaderLen,
         free(msg);
         return SCARD_F_INTERNAL_ERROR;
     }
-    bytes = 8192;
+    {
+        int msg_size = 20 + cchReaderLen + orig_atr_len;
+        if (msg_size < 256)
+        {
+            msg_size = 256;
+        }
+        bytes = msg_size;
+    }
     code = SCARD_STATUS;
     if (get_message(&code, msg, &bytes) != 0)
     {
@@ -695,10 +742,19 @@ SCardStatus(SCARDHANDLE hCard, LPSTR mszReaderName, LPDWORD pcchReaderLen,
     *pcchReaderLen = GET_UINT32(msg, offset);
     LLOGLN(10, ("SCardStatus: cchReaderLen out %d", (int)*pcchReaderLen));
     offset += 4;
+    /* Validate pcchReaderLen against remaining message bytes */
+    if ((int)*pcchReaderLen < 0 ||
+        (int)*pcchReaderLen > bytes - offset - 12)
+    {
+        LLOGLN(0, ("SCardStatus: error, pcchReaderLen %d exceeds "
+                    "message bounds", (int)*pcchReaderLen));
+        free(msg);
+        return SCARD_F_INTERNAL_ERROR;
+    }
     if (cchReaderLen > 0)
     {
         to_copy = cchReaderLen - 1;
-        if (*pcchReaderLen < to_copy)
+        if ((int)*pcchReaderLen < to_copy)
         {
             to_copy = *pcchReaderLen;
         }
@@ -720,6 +776,15 @@ SCardStatus(SCARDHANDLE hCard, LPSTR mszReaderName, LPDWORD pcchReaderLen,
     *pcbAtrLen = GET_UINT32(msg, offset);
     offset += 4;
     LLOGLN(10, ("SCardStatus: cbAtrLen %d", (int)*pcbAtrLen));
+    /* Validate pcbAtrLen against caller's buffer */
+    if ((int)*pcbAtrLen > orig_atr_len)
+    {
+        LLOGLN(0, ("SCardStatus: error, server returned atr_len %d "
+                    "but buffer is only %d",
+                    (int)*pcbAtrLen, orig_atr_len));
+        free(msg);
+        return SCARD_F_INTERNAL_ERROR;
+    }
     memcpy(pbAtr, msg + offset, *pcbAtrLen);
     offset += *pcbAtrLen;
     status = GET_UINT32(msg, offset);
@@ -754,7 +819,22 @@ SCardGetStatusChange(SCARDCONTEXT hContext, DWORD dwTimeout,
         LLOGLN(0, ("SCardGetStatusChange: error, not connected"));
         return SCARD_F_INTERNAL_ERROR;
     }
-    msg = (char *) g_malloc_nofail(8192);
+    /* Check for integer overflow: each reader needs 148 bytes */
+    if (cReaders > (PCSC_MAX_MSG_SIZE - 12) / 148)
+    {
+        LLOGLN(0, ("SCardGetStatusChange: error, cReaders %d too large",
+                    (int)cReaders));
+        return SCARD_F_INTERNAL_ERROR;
+    }
+    {
+        int msg_size = 12 + (int)cReaders * 148;
+        msg = alloc_msg_buf(msg_size);
+        if (msg == NULL)
+        {
+            LLOGLN(0, ("SCardGetStatusChange: error, alloc_msg_buf"));
+            return SCARD_F_INTERNAL_ERROR;
+        }
+    }
     SET_UINT32(msg, 0, hContext);
     SET_UINT32(msg, 4, dwTimeout);
     SET_UINT32(msg, 8, cReaders);
@@ -804,7 +884,24 @@ SCardGetStatusChange(SCARDCONTEXT hContext, DWORD dwTimeout,
         free(msg);
         return SCARD_F_INTERNAL_ERROR;
     }
-    bytes = 8192;
+    /* Reuse msg buffer for response; ensure it's large enough.
+     * Response: 4 + cReaders * 48 + 4 bytes */
+    {
+        int resp_size = 8 + (int)cReaders * 48;
+        if (resp_size > 12 + (int)cReaders * 148)
+        {
+            free(msg);
+            msg = alloc_msg_buf(resp_size);
+            if (msg == NULL)
+            {
+                LLOGLN(0, ("SCardGetStatusChange: error, alloc resp"));
+                return SCARD_F_INTERNAL_ERROR;
+            }
+        }
+        bytes = resp_size > 12 + (int)cReaders * 148
+                ? resp_size
+                : 12 + (int)cReaders * 148;
+    }
     code = SCARD_GET_STATUS_CHANGE;
     if (get_message(&code, msg, &bytes) != 0)
     {
@@ -897,13 +994,30 @@ SCardControl(SCARDHANDLE hCard, DWORD dwControlCode, LPCVOID pbSendBuffer,
        control_code = (control_code & 0x3ffc) >> 2;
        control_code = SCARD_CTL_CODE(control_code); */
 
-    /* PCSC to Windows control code conversion */
+    /* PCSC to Windows control code conversion.
+     * PCSC: SCARD_CTL_CODE(code) = 0x42000000 + code
+     * Windows: CTL_CODE(FILE_DEVICE_SMARTCARD=49, code, METHOD_BUFFERED=0,
+     *          FILE_ANY_ACCESS=0) = (49 << 16) | (code << 2)
+     * So: extract code = pcsc_ctl - 0x42000000, then apply Windows formula */
     dwControlCode = dwControlCode - 0x42000000;
     dwControlCode = dwControlCode << 2;
     dwControlCode = dwControlCode | (49 << 16);
     LLOGLN(10, ("  MS dwControlCode 0x%8.8d", (int)dwControlCode));
 
-    msg = (char *) g_malloc_nofail(8192);
+    {
+        int msg_size = 16 + (int)cbSendLength + 4;
+        int resp_size = 4 + (int)cbRecvLength + 4;
+        if (resp_size > msg_size)
+        {
+            msg_size = resp_size;
+        }
+        msg = alloc_msg_buf(msg_size);
+        if (msg == NULL)
+        {
+            LLOGLN(0, ("SCardControl: error, alloc_msg_buf"));
+            return SCARD_F_INTERNAL_ERROR;
+        }
+    }
     offset = 0;
     SET_UINT32(msg, offset, hCard);
     offset += 4;
@@ -921,7 +1035,11 @@ SCardControl(SCARDHANDLE hCard, DWORD dwControlCode, LPCVOID pbSendBuffer,
         free(msg);
         return SCARD_F_INTERNAL_ERROR;
     }
-    bytes = 8192;
+    {
+        int resp_size = 4 + (int)cbRecvLength + 4;
+        int send_size = 16 + (int)cbSendLength + 4;
+        bytes = resp_size > send_size ? resp_size : send_size;
+    }
     code = SCARD_CONTROL;
     if (get_message(&code, msg, &bytes) != 0)
     {
@@ -939,6 +1057,14 @@ SCardControl(SCARDHANDLE hCard, DWORD dwControlCode, LPCVOID pbSendBuffer,
     *lpBytesReturned = GET_UINT32(msg, offset);
     LLOGLN(10, ("  cbRecvLength %d", (int)*lpBytesReturned));
     offset += 4;
+    if (*lpBytesReturned > cbRecvLength)
+    {
+        LLOGLN(0, ("SCardControl: error, server returned %d bytes "
+                    "but buffer is only %d",
+                    (int)*lpBytesReturned, (int)cbRecvLength));
+        free(msg);
+        return SCARD_F_INTERNAL_ERROR;
+    }
     memcpy(pbRecvBuffer, msg + offset, *lpBytesReturned);
     offset += *lpBytesReturned;
     status = GET_UINT32(msg, offset);
@@ -960,6 +1086,7 @@ SCardTransmit(SCARDHANDLE hCard, const SCARD_IO_REQUEST *pioSendPci,
     int status;
     int extra_len;
     int got_recv_pci;
+    DWORD orig_recv_len;
 
     LLOGLN(10, ("SCardTransmit:"));
     if (g_sck == -1)
@@ -968,6 +1095,7 @@ SCardTransmit(SCARDHANDLE hCard, const SCARD_IO_REQUEST *pioSendPci,
         return SCARD_F_INTERNAL_ERROR;
     }
 
+    orig_recv_len = *pcbRecvLength;
     LLOGLN(10, ("  hCard 0x%8.8x", (int)hCard));
     LLOGLN(10, ("  cbSendLength %d", (int)cbSendLength));
     LLOGLN(10, ("  cbRecvLength %d", (int)*pcbRecvLength));
@@ -979,17 +1107,26 @@ SCardTransmit(SCARDHANDLE hCard, const SCARD_IO_REQUEST *pioSendPci,
         LLOGLN(10, ("    pioRecvPci->dwProtocol %d", (int)(pioRecvPci->dwProtocol)));
         LLOGLN(10, ("    pioRecvPci->cbPciLength %d", (int)(pioRecvPci->cbPciLength)));
     }
-    msg = (char *) g_malloc_nofail(8192);
+    {
+        /* Send buffer: 4(hCard) + 16(sendPci) + 4(sendLen) + cbSendLength
+         * + 12(recvPci) + 4(recvLen) = 40 + cbSendLength */
+        int msg_size = 64 + (int)cbSendLength + (int)*pcbRecvLength;
+        msg = alloc_msg_buf(msg_size);
+        if (msg == NULL)
+        {
+            LLOGLN(0, ("SCardTransmit: error, alloc_msg_buf"));
+            return SCARD_F_INTERNAL_ERROR;
+        }
+    }
     offset = 0;
     SET_UINT32(msg, offset, hCard);
     offset += 4;
     SET_UINT32(msg, offset, pioSendPci->dwProtocol);
     offset += 4;
-    /*  SET_UINT32(msg, offset, pioSendPci->cbPciLength); */
-    SET_UINT32(msg, offset, 8);
+    SET_UINT32(msg, offset, pioSendPci->cbPciLength);
     offset += 4;
-    /*  extra_len = pioSendPci->cbPciLength - 8;  */
-    extra_len = 0;
+    extra_len = (pioSendPci->cbPciLength > 8)
+                ? (int)(pioSendPci->cbPciLength - 8) : 0;
     SET_UINT32(msg, offset, extra_len);
     offset += 4;
     memcpy(msg + offset, pioSendPci + 1, extra_len);
@@ -999,8 +1136,6 @@ SCardTransmit(SCARDHANDLE hCard, const SCARD_IO_REQUEST *pioSendPci,
     memcpy(msg + offset, pbSendBuffer, cbSendLength);
     offset += cbSendLength;
     got_recv_pci = (pioRecvPci != NULL) && (pioRecvPci->cbPciLength >= 8);
-    // TODO figure out why recv pci does not work
-    got_recv_pci = 0;
     if (got_recv_pci == 0)
     {
         SET_UINT32(msg, offset, 0); /* dwProtocol */
@@ -1030,7 +1165,12 @@ SCardTransmit(SCARDHANDLE hCard, const SCARD_IO_REQUEST *pioSendPci,
         free(msg);
         return SCARD_F_INTERNAL_ERROR;
     }
-    bytes = 8192;
+    {
+        /* Response: 12(recvPci) + 4(recvLen) + recvLength + 4(status) */
+        int resp_size = 24 + (int)orig_recv_len;
+        int send_size = 64 + (int)cbSendLength + (int)orig_recv_len;
+        bytes = resp_size > send_size ? resp_size : send_size;
+    }
     code = SCARD_TRANSMIT;
     if (get_message(&code, msg, &bytes) != 0)
     {
@@ -1065,6 +1205,14 @@ SCardTransmit(SCARDHANDLE hCard, const SCARD_IO_REQUEST *pioSendPci,
     *pcbRecvLength = GET_UINT32(msg, offset);
     offset += 4;
     LLOGLN(10, ("  cbRecvLength %d", (int)*pcbRecvLength));
+    if (*pcbRecvLength > orig_recv_len)
+    {
+        LLOGLN(0, ("SCardTransmit: error, server returned %d bytes "
+                    "but buffer is only %d",
+                    (int)*pcbRecvLength, (int)orig_recv_len));
+        free(msg);
+        return SCARD_F_INTERNAL_ERROR;
+    }
     memcpy(pbRecvBuffer, msg + offset, *pcbRecvLength);
     LHEXDUMP(10, (pbRecvBuffer, *pcbRecvLength));
     offset += *pcbRecvLength;
@@ -1117,7 +1265,23 @@ SCardListReaders(SCARDCONTEXT hContext, LPCSTR mszGroups, LPSTR mszReaders,
     {
         *pcchReaders = 0;
     }
-    msg = (char *) g_malloc_nofail(8192);
+    {
+        int msg_size = 12;
+        if (mszGroups != 0)
+        {
+            msg_size += (int)strlen(mszGroups);
+        }
+        if (msg_size < 8192)
+        {
+            msg_size = 8192;
+        }
+        msg = alloc_msg_buf(msg_size);
+        if (msg == NULL)
+        {
+            LLOGLN(0, ("SCardListReaders: error, alloc_msg_buf"));
+            return SCARD_F_INTERNAL_ERROR;
+        }
+    }
     offset = 0;
     SET_UINT32(msg, offset, hContext);
     offset += 4;
@@ -1143,7 +1307,18 @@ SCardListReaders(SCARDCONTEXT hContext, LPCSTR mszGroups, LPSTR mszReaders,
         free(msg);
         return SCARD_F_INTERNAL_ERROR;
     }
-    bytes = 8192;
+    {
+        int msg_size = 12;
+        if (mszGroups != 0)
+        {
+            msg_size += (int)strlen(mszGroups);
+        }
+        if (msg_size < 8192)
+        {
+            msg_size = 8192;
+        }
+        bytes = msg_size;
+    }
     code = SCARD_LIST_READERS;
     if (get_message(&code, msg, &bytes) != 0)
     {
@@ -1240,7 +1415,7 @@ SCardCancel(SCARDCONTEXT hContext)
         LLOGLN(0, ("SCardCancel: error, get_message"));
         return SCARD_F_INTERNAL_ERROR;
     }
-    if ((code != SCARD_RELEASE_CONTEXT) || (bytes != 4))
+    if ((code != SCARD_CANCEL) || (bytes != 4))
     {
         LLOGLN(0, ("SCardCancel: error, bad code"));
         return SCARD_F_INTERNAL_ERROR;

@@ -34,6 +34,8 @@
 #include <openssl/rsa.h>
 #include <openssl/dh.h>
 #include <openssl/crypto.h>
+#include <openssl/x509.h>
+#include <openssl/x509v3.h>
 
 #include "os_calls.h"
 #include "string_calls.h"
@@ -128,6 +130,12 @@ DH_set0_pqg(DH *dh, BIGNUM *p, BIGNUM *q, BIGNUM *g)
     }
 
     return 1;
+}
+
+static inline const unsigned char *
+ASN1_STRING_get0_data(const ASN1_STRING *x)
+{
+    return ASN1_STRING_data((ASN1_STRING *)(x));
 }
 #endif /* OPENSSL_VERSION_NUMBER >= 0x10100000L */
 
@@ -1633,5 +1641,287 @@ const char
     return OpenSSL_version(OPENSSL_VERSION);
 #endif
 
+}
+
+/*****************************************************************************/
+/* MS UPN OID: 1.3.6.1.4.1.311.20.2.3 */
+static const char *g_ms_upn_oid = "1.3.6.1.4.1.311.20.2.3";
+
+/*****************************************************************************/
+int
+ssl_cert_get_subject_cn(const unsigned char *cert_der, int cert_len,
+                        char *cn, int cn_len)
+{
+    X509 *x509;
+    X509_NAME *subject;
+    int rc;
+
+    if (cert_der == NULL || cert_len <= 0 ||
+            cn == NULL || cn_len <= 0)
+    {
+        return 1;
+    }
+
+    cn[0] = '\0';
+
+    x509 = d2i_X509(NULL, &cert_der, cert_len);
+    if (x509 == NULL)
+    {
+        LOG(LOG_LEVEL_ERROR,
+            "ssl_cert_get_subject_cn: failed to parse "
+            "DER certificate");
+        return 1;
+    }
+
+    subject = X509_get_subject_name(x509);
+    if (subject == NULL)
+    {
+        LOG(LOG_LEVEL_ERROR,
+            "ssl_cert_get_subject_cn: failed to get "
+            "subject name");
+        X509_free(x509);
+        return 1;
+    }
+
+    rc = X509_NAME_get_text_by_NID(subject, NID_commonName,
+                                   cn, cn_len);
+    X509_free(x509);
+
+    if (rc < 0)
+    {
+        LOG(LOG_LEVEL_ERROR,
+            "ssl_cert_get_subject_cn: CN not found "
+            "in subject");
+        return 1;
+    }
+
+    return 0;
+}
+
+/*****************************************************************************/
+int
+ssl_cert_get_san_upn(const unsigned char *cert_der, int cert_len,
+                     char *upn, int upn_len)
+{
+    X509 *x509;
+    GENERAL_NAMES *san;
+    GENERAL_NAME *gen;
+    ASN1_OBJECT *upn_oid;
+    int i;
+    int num;
+    int found;
+
+    if (cert_der == NULL || cert_len <= 0 ||
+            upn == NULL || upn_len <= 0)
+    {
+        return 1;
+    }
+
+    upn[0] = '\0';
+
+    x509 = d2i_X509(NULL, &cert_der, cert_len);
+    if (x509 == NULL)
+    {
+        LOG(LOG_LEVEL_ERROR,
+            "ssl_cert_get_san_upn: failed to parse "
+            "DER certificate");
+        return 1;
+    }
+
+    san = (GENERAL_NAMES *) X509_get_ext_d2i(
+              x509, NID_subject_alt_name, NULL, NULL);
+    if (san == NULL)
+    {
+        LOG(LOG_LEVEL_DEBUG,
+            "ssl_cert_get_san_upn: no SAN extension "
+            "found");
+        X509_free(x509);
+        return 1;
+    }
+
+    upn_oid = OBJ_txt2obj(g_ms_upn_oid, 1);
+    if (upn_oid == NULL)
+    {
+        LOG(LOG_LEVEL_ERROR,
+            "ssl_cert_get_san_upn: failed to create "
+            "UPN OID object");
+        GENERAL_NAMES_free(san);
+        X509_free(x509);
+        return 1;
+    }
+
+    found = 0;
+    num = sk_GENERAL_NAME_num(san);
+
+    /* First pass: look for MS UPN otherName */
+    for (i = 0; i < num; i++)
+    {
+        gen = sk_GENERAL_NAME_value(san, i);
+        if (gen->type == GEN_OTHERNAME)
+        {
+            OTHERNAME *other;
+            other = gen->d.otherName;
+            if (OBJ_cmp(other->type_id, upn_oid) == 0)
+            {
+                /* The UPN value is a UTF8String */
+                ASN1_TYPE *val;
+                val = other->value;
+                if (val != NULL &&
+                        val->type == V_ASN1_UTF8STRING)
+                {
+                    ASN1_UTF8STRING *utf8;
+                    int copy_len;
+                    utf8 = val->value.utf8string;
+                    copy_len = ASN1_STRING_length(utf8);
+                    if (copy_len >= upn_len)
+                    {
+                        copy_len = upn_len - 1;
+                    }
+                    g_memcpy(upn,
+                             ASN1_STRING_get0_data(utf8),
+                             copy_len);
+                    upn[copy_len] = '\0';
+                    found = 1;
+                    break;
+                }
+            }
+        }
+    }
+
+    /* Second pass: fall back to rfc822Name (email) */
+    if (!found)
+    {
+        for (i = 0; i < num; i++)
+        {
+            gen = sk_GENERAL_NAME_value(san, i);
+            if (gen->type == GEN_EMAIL)
+            {
+                ASN1_IA5STRING *email;
+                int copy_len;
+                email = gen->d.rfc822Name;
+                copy_len = ASN1_STRING_length(email);
+                if (copy_len >= upn_len)
+                {
+                    copy_len = upn_len - 1;
+                }
+                g_memcpy(upn,
+                         ASN1_STRING_get0_data(email),
+                         copy_len);
+                upn[copy_len] = '\0';
+                found = 1;
+                break;
+            }
+        }
+    }
+
+    ASN1_OBJECT_free(upn_oid);
+    GENERAL_NAMES_free(san);
+    X509_free(x509);
+
+    if (!found)
+    {
+        LOG(LOG_LEVEL_DEBUG,
+            "ssl_cert_get_san_upn: no UPN or email "
+            "found in SAN");
+        return 1;
+    }
+
+    return 0;
+}
+
+/*****************************************************************************/
+int
+ssl_cert_verify(const unsigned char *cert_der, int cert_len,
+                const char *ca_cert_file,
+                const char *ca_cert_dir)
+{
+    X509 *x509;
+    X509_STORE *store;
+    X509_STORE_CTX *ctx;
+    int rc;
+
+    if (cert_der == NULL || cert_len <= 0)
+    {
+        return 1;
+    }
+
+    if (ca_cert_file == NULL && ca_cert_dir == NULL)
+    {
+        LOG(LOG_LEVEL_ERROR,
+            "ssl_cert_verify: no CA certificate file "
+            "or directory specified");
+        return 1;
+    }
+
+    x509 = d2i_X509(NULL, &cert_der, cert_len);
+    if (x509 == NULL)
+    {
+        LOG(LOG_LEVEL_ERROR,
+            "ssl_cert_verify: failed to parse "
+            "DER certificate");
+        return 1;
+    }
+
+    store = X509_STORE_new();
+    if (store == NULL)
+    {
+        LOG(LOG_LEVEL_ERROR,
+            "ssl_cert_verify: failed to create "
+            "X509 store");
+        X509_free(x509);
+        return 1;
+    }
+
+    if (X509_STORE_load_locations(store, ca_cert_file,
+                                  ca_cert_dir) != 1)
+    {
+        LOG(LOG_LEVEL_ERROR,
+            "ssl_cert_verify: failed to load CA "
+            "certificates from file=%s dir=%s",
+            ca_cert_file != NULL ? ca_cert_file : "(null)",
+            ca_cert_dir != NULL ? ca_cert_dir : "(null)");
+        X509_STORE_free(store);
+        X509_free(x509);
+        return 1;
+    }
+
+    ctx = X509_STORE_CTX_new();
+    if (ctx == NULL)
+    {
+        LOG(LOG_LEVEL_ERROR,
+            "ssl_cert_verify: failed to create "
+            "X509 store context");
+        X509_STORE_free(store);
+        X509_free(x509);
+        return 1;
+    }
+
+    if (X509_STORE_CTX_init(ctx, store, x509, NULL) != 1)
+    {
+        LOG(LOG_LEVEL_ERROR,
+            "ssl_cert_verify: failed to initialize "
+            "X509 store context");
+        X509_STORE_CTX_free(ctx);
+        X509_STORE_free(store);
+        X509_free(x509);
+        return 1;
+    }
+
+    rc = X509_verify_cert(ctx);
+    if (rc != 1)
+    {
+        int err;
+        err = X509_STORE_CTX_get_error(ctx);
+        LOG(LOG_LEVEL_ERROR,
+            "ssl_cert_verify: certificate verification "
+            "failed: %s",
+            X509_verify_cert_error_string(err));
+    }
+
+    X509_STORE_CTX_free(ctx);
+    X509_STORE_free(store);
+    X509_free(x509);
+
+    return (rc == 1) ? 0 : 1;
 }
 

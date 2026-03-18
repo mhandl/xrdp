@@ -222,6 +222,28 @@ auth_uds(const char *user, enum scp_login_status *errorcode)
 }
 
 /******************************************************************************/
+/* returns non-NULL for success */
+struct auth_info *
+auth_cert(const char *user, const unsigned char *cert_der, int cert_len,
+          const char *client_ip, enum scp_login_status *errorcode)
+{
+    (void) cert_der;
+    (void) cert_len;
+    (void) client_ip;
+
+    LOG(LOG_LEVEL_ERROR,
+        "auth_cert: certificate authentication is not supported "
+        "by the Kerberos auth backend for user %s", user);
+
+    if (errorcode != NULL)
+    {
+        *errorcode = E_SCP_LOGIN_NOT_AUTHENTICATED;
+    }
+
+    return NULL;
+}
+
+/******************************************************************************/
 /* returns error */
 int
 auth_start_session(struct auth_info *auth_info, const char *display)

@@ -41,6 +41,8 @@ msgno_to_str(unsigned short n)
         (n == E_EICP_SYS_LOGIN_REQUEST) ? "EICP_SYS_LOGIN_REQUEST" :
         (n == E_EICP_SYS_LOGIN_RESPONSE) ? "EICP_SYS_LOGIN_RESPONSE" :
 
+        (n == E_EICP_CERT_LOGIN_REQUEST) ? "EICP_CERT_LOGIN_REQUEST" :
+
         (n == E_EICP_LOGOUT_REQUEST) ? "EICP_LOGOUT_REQUEST" :
 
         (n == E_EICP_CREATE_SESSION_REQUEST) ? "EICP_CREATE_SESSION_REQUEST" :
@@ -260,6 +262,105 @@ eicp_get_uds_login_request(struct trans *trans,
                            int *scp_fd)
 {
     return libipm_msg_in_parse( trans, "h", scp_fd);
+}
+
+/*****************************************************************************/
+int
+eicp_send_cert_login_request(struct trans *trans,
+                             const char *username,
+                             const unsigned char *cert_der,
+                             int cert_len,
+                             const char *ip_addr,
+                             int scp_fd)
+{
+    int rv;
+    struct libipm_fsb cert_descriptor =
+    {
+        (void *)cert_der, (unsigned int)cert_len
+    };
+
+    rv = libipm_msg_out_init(
+             trans,
+             (int)E_EICP_CERT_LOGIN_REQUEST,
+             "si",
+             username,
+             cert_len);
+
+    if (rv == 0)
+    {
+        rv = libipm_msg_out_append(trans, "B", &cert_descriptor);
+    }
+
+    if (rv == 0)
+    {
+        rv = libipm_msg_out_append(trans, "sh", ip_addr, scp_fd);
+    }
+
+    if (rv == 0)
+    {
+        libipm_msg_out_mark_end(trans);
+        if (trans_force_write(trans) != 0)
+        {
+            rv = E_LI_TRANSPORT_ERROR;
+        }
+    }
+
+    return rv;
+}
+
+/*****************************************************************************/
+
+int
+eicp_get_cert_login_request(struct trans *trans,
+                            const char **username,
+                            const unsigned char **cert_der,
+                            int *cert_len,
+                            const char **ip_addr,
+                            int *scp_fd)
+{
+    int rv;
+    int32_t i_cert_len;
+    unsigned char *cert_buf;
+    struct libipm_fsb cert_descriptor;
+
+    *cert_der = NULL;
+    *cert_len = 0;
+
+    rv = libipm_msg_in_parse(trans, "si",
+                              username, &i_cert_len);
+    if (rv != 0)
+    {
+        return rv;
+    }
+
+    if (i_cert_len <= 0)
+    {
+        return E_LI_BAD_VALUE;
+    }
+
+    cert_buf = (unsigned char *)g_malloc(i_cert_len, 0);
+    if (cert_buf == NULL)
+    {
+        return E_LI_NO_MEMORY;
+    }
+
+    cert_descriptor.data = (void *)cert_buf;
+    cert_descriptor.datalen = (unsigned int)i_cert_len;
+
+    rv = libipm_msg_in_parse(trans, "Bsh",
+                              &cert_descriptor, ip_addr,
+                              scp_fd);
+    if (rv == 0)
+    {
+        *cert_der = cert_buf;
+        *cert_len = i_cert_len;
+    }
+    else
+    {
+        g_free(cert_buf);
+    }
+
+    return rv;
 }
 
 /*****************************************************************************/

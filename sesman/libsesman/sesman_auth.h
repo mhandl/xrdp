@@ -62,6 +62,29 @@ auth_uds(const char *user, enum scp_login_status *errorcode);
 
 /**
  *
+ * @brief Gets an auth handle for a certificate login
+ *
+ * The certificate has already been verified cryptographically by
+ * sesexec, so no password authentication is needed. PAM account
+ * management (pam_acct_mgmt) is still performed to check account
+ * validity.
+ *
+ * @param user User's login name
+ * @param cert_der DER-encoded client certificate (may be NULL)
+ * @param cert_len Length of cert_der in bytes
+ * @param client_ip IP address of connecting client (or ""/NULL
+ *                  if not known)
+ * @param[out] errorcode Error code for the operation.
+ *             E_SCP_LOGIN_OK on success.
+ * @return auth handle on success, NULL on failure
+ *
+ */
+struct auth_info *
+auth_cert(const char *user, const unsigned char *cert_der, int cert_len,
+          const char *client_ip, enum scp_login_status *errorcode);
+
+/**
+ *
  * @brief Starts a session
  * @param auth_info Auth handle created by auth_userpass
  * @param display Display name

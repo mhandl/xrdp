@@ -85,6 +85,30 @@ struct login_info *
 login_info_uds_login_user(struct trans *scp_trans);
 
 /**
+ * @brief Attempt a certificate-based login
+ * @param scp_trans SCP transport for talking to the client
+ * @param username Username extracted from certificate
+ * @param cert_der DER-encoded client certificate
+ * @param cert_len Length of cert_der in bytes
+ * @param ip_addr IP address for xrdp client
+ *
+ * @result Allocated login_info struct for a successful login
+ *
+ * This is similar to login_info_sys_login_user() but uses
+ * certificate-based authentication (auth_cert) instead of
+ * password-based authentication (auth_userpass).
+ *
+ * The username in the returned structure may differ from the passed-in
+ * username if multiple names map to the same UID.
+ */
+struct login_info *
+login_info_cert_login_user(struct trans *scp_trans,
+                           const char *username,
+                           const unsigned char *cert_der,
+                           int cert_len,
+                           const char *ip_addr);
+
+/**
  * Free a struct login_info
  */
 void

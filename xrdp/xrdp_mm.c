@@ -33,6 +33,8 @@
 #include <ctype.h>
 #include "xrdp_encoder.h"
 #include "xrdp_sockets.h"
+#include "xrdp_smartcard.h"
+#include "ssl_calls.h"
 #include "xrdp_egfx.h"
 #include "libxrdp.h"
 #include "xrdp_channel.h"
@@ -235,6 +237,16 @@ xrdp_mm_delete(struct xrdp_mm *self)
     xrdp_egfx_shutdown_full(self->egfx);
 
     close_sesman_file_descriptors(self);
+
+    /* Free smartcard resources */
+    if (self->smartcard != 0)
+    {
+        xrdp_smartcard_delete(self->smartcard);
+        self->smartcard = 0;
+    }
+    g_free(self->smartcard_cert_der);
+    self->smartcard_cert_der = 0;
+
     g_free(self);
 }
 

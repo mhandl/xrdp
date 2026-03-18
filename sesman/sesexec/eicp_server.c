@@ -36,9 +36,12 @@
 #include "os_calls.h"
 #include "ercp.h"
 #include "scp.h"
+#include "sesman_config.h"
 #include "sesexec.h"
 #include "sesexec_discover.h"
 #include "session.h"
+#include "ssl_calls.h"
+#include "string_calls.h"
 
 /******************************************************************************/
 static int
@@ -86,6 +89,129 @@ handle_sys_login_request(struct trans *self)
 
             trans_delete(scp_trans); // Closes scp_fd as well
         }
+    }
+
+    return rv;
+}
+
+/******************************************************************************/
+static int
+handle_cert_login_request(struct trans *self)
+{
+    const char *username;
+    const unsigned char *cert_der;
+    int cert_len;
+    const char *ip_addr;
+    int scp_fd;
+
+    int rv = eicp_get_cert_login_request(self, &username,
+                                         &cert_der, &cert_len,
+                                         &ip_addr, &scp_fd);
+    if (rv == 0)
+    {
+        struct trans *scp_trans;
+        scp_trans = scp_init_trans_from_fd(scp_fd, TRANS_TYPE_SERVER,
+                                           sesexec_is_term);
+        if (scp_trans == NULL)
+        {
+            LOG(LOG_LEVEL_ERROR, "Can't create SCP trans");
+            g_file_close(scp_fd);
+            rv = 1;
+        }
+        else
+        {
+            if (g_login_info != NULL)
+            {
+                /* Shouldn't get here. Prevent a memory leak. */
+                LOG(LOG_LEVEL_WARNING,
+                    "Asked to cert login when a login has already"
+                    " been made");
+                login_info_free(g_login_info);
+            }
+
+            if (!g_cfg->sec.cert_auth_enabled)
+            {
+                LOG(LOG_LEVEL_ERROR,
+                    "Certificate authentication is not enabled");
+                g_login_info = NULL;
+            }
+            else if (ssl_cert_verify(cert_der, cert_len,
+                                     g_cfg->sec.cert_ca_file,
+                                     g_cfg->sec.cert_ca_dir) != 0)
+            {
+                LOG(LOG_LEVEL_ERROR,
+                    "Certificate verification failed for user %s",
+                    username);
+                g_login_info = NULL;
+            }
+            else
+            {
+                /*
+                 * Extract the username from the certificate
+                 * based on the configured field
+                 */
+                char cert_username[256];
+                int extract_ok = 1;
+
+                if (g_cfg->sec.cert_username_field != NULL &&
+                        g_strcasecmp(g_cfg->sec.cert_username_field,
+                                     "UPN") == 0)
+                {
+                    if (ssl_cert_get_san_upn(cert_der, cert_len,
+                                             cert_username,
+                                             sizeof(cert_username)) != 0)
+                    {
+                        LOG(LOG_LEVEL_ERROR,
+                            "Failed to extract UPN from"
+                            " certificate");
+                        extract_ok = 0;
+                    }
+                }
+                else
+                {
+                    if (ssl_cert_get_subject_cn(cert_der, cert_len,
+                                                cert_username,
+                                                sizeof(cert_username))
+                            != 0)
+                    {
+                        LOG(LOG_LEVEL_ERROR,
+                            "Failed to extract CN from"
+                            " certificate");
+                        extract_ok = 0;
+                    }
+                }
+
+                if (extract_ok)
+                {
+                    g_login_info = login_info_cert_login_user(
+                                       scp_trans,
+                                       cert_username,
+                                       cert_der,
+                                       cert_len,
+                                       ip_addr);
+                }
+                else
+                {
+                    g_login_info = NULL;
+                }
+            }
+
+            if (g_login_info != NULL)
+            {
+                rv = eicp_send_sys_login_response(
+                         self, 1,
+                         g_login_info->uid, scp_fd);
+            }
+            else
+            {
+                rv = eicp_send_sys_login_response(
+                         self, 0, (uid_t) -1, 0);
+            }
+
+            trans_delete(scp_trans);
+        }
+
+        g_free((void *)cert_der);
     }
 
     return rv;
@@ -239,6 +365,10 @@ eicp_server(struct trans *self)
     {
         case E_EICP_SYS_LOGIN_REQUEST:
             rv = handle_sys_login_request(self);
+            break;
+
+        case E_EICP_CERT_LOGIN_REQUEST:
+            rv = handle_cert_login_request(self);
             break;
 
         case E_EICP_UDS_LOGIN_REQUEST:

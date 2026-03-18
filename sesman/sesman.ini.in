@@ -70,6 +70,15 @@ RestrictInboundClipboard=none
 ;    be able to connect to your sessions.
 SessionSockdirGroup=root
 #SessionSockdirGroup=xrdp
+; Certificate authentication via smartcard
+; Set CertAuthEnabled to true to enable certificate-based authentication
+CertAuthEnabled=false
+; CA certificate file used to verify client certificates
+CertCAFile=/etc/xrdp/ca.pem
+; CA certificate directory (may be empty if CertCAFile is set)
+CertCADir=
+; Which certificate field contains the username: "CN" or "UPN"
+CertUsernameField=UPN
 
 
 [Sessions]

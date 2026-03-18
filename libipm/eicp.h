@@ -52,7 +52,10 @@ enum eicp_msg_code
     // No E_EICP_LOGOUT_RESPONSE
 
     E_EICP_CREATE_SESSION_REQUEST,
-    E_EICP_CREATE_SESSION_RESPONSE
+    E_EICP_CREATE_SESSION_RESPONSE,
+
+    E_EICP_CERT_LOGIN_REQUEST
+    /* No E_EICP_CERT_LOGIN_RESPONSE (uses E_EICP_SYS_LOGIN_RESPONSE) */
 };
 
 /* Common facilities */
@@ -254,6 +257,55 @@ int
 eicp_get_uds_login_request(struct trans *trans,
                            int *scp_fd);
 
+
+/**
+ * Send an E_EICP_CERT_LOGIN_REQUEST (sesman)
+ *
+ * @param trans EICP transport
+ * @param username Username
+ * @param cert_der DER-encoded client certificate
+ * @param cert_len Length of cert_der in bytes
+ * @param ip_addr IP address for the client (or "" if not known)
+ * @param scp_fd SCP file descriptor from sesman client
+ * @return != 0 for error
+ *
+ * sesexec replies (eventually) with E_EICP_SYS_LOGIN_RESPONSE
+ *
+ * Once this message has been sent, sesman can close its own SCP
+ * transport down, as sesexec is responsible for client
+ * communication.
+ */
+int
+eicp_send_cert_login_request(struct trans *trans,
+                             const char *username,
+                             const unsigned char *cert_der,
+                             int cert_len,
+                             const char *ip_addr,
+                             int scp_fd);
+
+/**
+ * Parse an incoming E_EICP_CERT_LOGIN_REQUEST message (sesexec)
+ *
+ * @param trans EICP transport
+ * @param[out] username Username
+ * @param[out] cert_der DER-encoded client certificate
+ * @param[out] cert_len Length of cert_der in bytes
+ * @param[out] ip_addr IP address for the client (or "" if not known)
+ * @param[out] scp_fd SCP file descriptor from sesman client
+ * @return != 0 for error
+ *
+ * The returned cert_der is dynamically allocated and must be
+ * freed by the caller with g_free(). The username and ip_addr
+ * pointers are valid until eicp_msg_in_reset() is called for
+ * the transport.
+ */
+int
+eicp_get_cert_login_request(struct trans *trans,
+                            const char **username,
+                            const unsigned char **cert_der,
+                            int *cert_len,
+                            const char **ip_addr,
+                            int *scp_fd);
 
 /**
  * Send an E_EICP_LOGOUT_REQUEST (sesexec)

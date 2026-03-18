@@ -129,6 +129,27 @@ struct config_security
      * @brief Group to have read access to the session sockdirs
      */
     char *session_sockdir_group;
+
+    /**
+     * @var cert_auth_enabled
+     * @brief Enable smartcard certificate authentication
+     */
+    int cert_auth_enabled;
+    /**
+     * @var cert_ca_file
+     * @brief CA certificate file path
+     */
+    char *cert_ca_file;
+    /**
+     * @var cert_ca_dir
+     * @brief CA certificate directory
+     */
+    char *cert_ca_dir;
+    /**
+     * @var cert_username_field
+     * @brief Which cert field has username ("CN" or "UPN")
+     */
+    char *cert_username_field;
 };
 
 /**
